@@ -3049,10 +3049,14 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
 
     private fun transformGestureFinish(x: Float, y: Float) {
         val t = transform ?: return
-        t.box = transformBoxAt(t, x, y)
+        if (t.grab == TransformGrab.NONE) return
+        val before = t.gestureStart
+        val after = transformBoxAt(t, x, y)
+        t.box = after
         t.grab = TransformGrab.NONE
         onSelectionDragVisual(false)
         reportTransformChanged(t)
+        if (before != after) paperListener?.onTransformGestureCommitted(t.contentId, before, after)
         invalidate()
     }
 
