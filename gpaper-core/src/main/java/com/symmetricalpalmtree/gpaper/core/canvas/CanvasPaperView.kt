@@ -500,11 +500,11 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
 
     /** Whether the stylus is currently on the glass — for device subclasses whose
      *  deferred hardware handoffs must never fire mid-stroke (the Ratta clear ladder). */
-    override val isPenDown: Boolean get() = penDown
+    override val isPenDown: Boolean get() = !released && penDown
     @Volatile private var penLastLiftMs = 0L
     @Volatile private var penHovering = false
     @Volatile private var penLastHoverMs = 0L
-    private var released = false
+    @Volatile private var released = false
 
     // ── Listeners ────────────────────────────────────────────────────────────
 
