@@ -815,46 +815,68 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
 
     // ── EPD content handoffs ─────────────────────────────────────────────────
 
-    /** The region a posted `handwritingRepaint` will cover, while one is pending — so
-     *  several content calls in one main-loop turn (setTemplate + setPageSize +
-     *  loadStrokes on a page turn) coalesce into a single panel refresh instead of
-     *  flashing once each. Null when nothing is posted. A full-view call and a regional
-     *  one landing together union to the full view, which is the right answer. */
+    /** Content changes before a frame commits share one panel refresh region. */
     private var epdRepaintRegion: Rect? = null
+    private var epdFrameObserver: ViewTreeObserver? = null
+    private var epdFrameCallback: Runnable? = null
+    private var epdRepaintGeneration = 0L
+
+    /** Unregister callbacks when possible; the generation also rejects ones already queued. */
+    private fun cancelPendingEpdRepaint() {
+        epdRepaintGeneration++
+        epdFrameCallback?.let { callback ->
+            removeCallbacks(callback)
+            epdFrameObserver?.takeIf { it.isAlive }?.unregisterFrameCommitCallback(callback)
+        }
+        epdFrameCallback = null
+        epdFrameObserver = null
+        epdRepaintRegion = null
+    }
 
     /**
-     * The overlay handoff every committed-content swap needs on this hardware:
-     * render off → repaint the view ([block] must leave the committed layer current) →
-     * `handwritingRepaint` (commits the pixels; without it the change is invisible or
-     * leaves gray residue) → re-arm the raw path for the current tool.
-     *
-     * [region] is what the panel is asked to refresh, in view space; null is the whole
-     * view, which every content swap wants. A raster undo (0.1.29) passes the patch it
-     * changed instead, because the full-view repaint is the flash the class doc warns
-     * against, and an undo of one mark that flashed the whole page would make taking a
-     * mark back cost more than making it. Whether a regional refresh at pen-idle lands
-     * as cleanly as the mid-contact one the eraser uses is a device fact, judged on the
-     * panel — the full view is one argument away if it does not.
+     * Render off → update the committed layer → submit its Android frame → refresh
+     * the handwriting layer → re-arm the current tool. A plain post can run before
+     * the new frame and expose old page pixels. Regional raster edits retain their
+     * smaller refresh region; multiple content changes union their regions.
      */
     private inline fun epdRepaintHandoff(region: Rect? = null, block: () -> Unit) {
-        if (!isSetup) {
+        if (!isSetup || penOwner !== this || !isAttachedToWindow) {
             block()
             return
         }
         touchHelper.setRawDrawingRenderEnabled(false)
         block()
-        val wanted = region ?: Rect(0, 0, width, height)
-        val pending = epdRepaintRegion
-        if (pending != null) {
-            pending.union(wanted)
-            return
-        }
-        epdRepaintRegion = Rect(wanted)
-        post {
-            val r = epdRepaintRegion ?: Rect(0, 0, width, height)
+        val wanted = Rect(region ?: Rect(0, 0, width, height))
+        epdRepaintRegion?.let { wanted.union(it) }
+        // A newer content change needs its own submitted frame, even if the previous
+        // frame's callback was captured by Android and is already waiting to run.
+        cancelPendingEpdRepaint()
+        epdRepaintRegion = wanted
+        val generation = epdRepaintGeneration
+        val repaint = Runnable {
+            if (generation != epdRepaintGeneration) return@Runnable
+            val dirty = epdRepaintRegion ?: return@Runnable
             epdRepaintRegion = null
-            EpdController.handwritingRepaint(this, r)
-            post { armRawForCurrentTool() }
+            epdFrameCallback = null
+            epdFrameObserver = null
+            if (!isSetup || penOwner !== this || !isAttachedToWindow || windowVisibility != View.VISIBLE) return@Runnable
+            EpdController.handwritingRepaint(this, dirty)
+            post {
+                // A dialog, teardown or a newer page change can happen before this turn.
+                if (generation == epdRepaintGeneration && isSetup && penOwner === this &&
+                    isAttachedToWindow && hasWindowFocus() && windowVisibility == View.VISIBLE
+                ) armRawForCurrentTool()
+            }
+        }
+        epdFrameCallback = repaint
+        if (isHardwareAccelerated) {
+            val observer = viewTreeObserver
+            epdFrameObserver = observer
+            observer.registerFrameCommitCallback(repaint)
+            invalidate()
+        } else {
+            // Frame-commit callbacks are not supported by the software renderer.
+            post(repaint)
         }
     }
 
@@ -978,6 +1000,7 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
     // ── Pipeline lifecycle ───────────────────────────────────────────────────
 
     private fun openRawDrawing() {
+        cancelPendingEpdRepaint()
         if (!isSetup) {
             applyLimitRect()
             touchHelper.openRawDrawing()
@@ -1012,6 +1035,7 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
      * refresh management.
      */
     private fun closeRawDrawingIfOwner(caller: String) {
+        cancelPendingEpdRepaint()
         if (!isSetup) return
         // Never carry an in-flight lasso gesture across a pipeline teardown.
         cancelRawLasso(caller)
