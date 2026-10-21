@@ -3301,6 +3301,8 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
             pressure = p.pressure,
             tilt = p.tilt,
             timeMillis = p.timeMillis,
+            // Use the latched contact mode: the barrel button may be released at UP.
+            isErasing = gestureMode == GestureMode.ERASE || tool == Tool.LASSO_ERASER,
         )
     }
 

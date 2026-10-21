@@ -669,12 +669,13 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
                 touchHelper.setRawDrawingRenderEnabled(false)
                 invalidate()
             }
-            emitRaw(RawAction.DOWN, RawTool.STYLUS_ERASER, touchPoint)
+            // The SDK reports the action here, not whether a barrel or eraser tip caused it.
+            emitRaw(RawAction.DOWN, RawTool.UNKNOWN, touchPoint, isErasing = true)
         }
 
         override fun onEndRawErasing(shortcutErasing: Boolean, touchPoint: TouchPoint) {
             markPenUp()
-            emitRaw(RawAction.UP, RawTool.STYLUS_ERASER, touchPoint)
+            emitRaw(RawAction.UP, RawTool.UNKNOWN, touchPoint, isErasing = true)
             finalizeEraseRedraw()
             post {
                 EpdController.handwritingRepaint(this@OnyxPaperView, Rect(0, 0, width, height))
@@ -683,7 +684,7 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
         }
 
         override fun onRawErasingTouchPointMoveReceived(touchPoint: TouchPoint) {
-            emitRaw(RawAction.MOVE, RawTool.STYLUS_ERASER, touchPoint)
+            emitRaw(RawAction.MOVE, RawTool.UNKNOWN, touchPoint, isErasing = true)
             eraseSweepStreamed = true
             eraseAlong(listOf(touchPoint.toStrokePoint()))
         }
@@ -760,7 +761,12 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
         return Math.toRadians(degrees.toDouble()).toFloat()
     }
 
-    private fun emitRaw(action: RawAction, rawTool: RawTool, tp: TouchPoint) {
+    private fun emitRaw(
+        action: RawAction,
+        rawTool: RawTool,
+        tp: TouchPoint,
+        isErasing: Boolean = tool == Tool.ERASER || tool == Tool.LASSO_ERASER,
+    ) {
         val p = tp.toStrokePoint()
         emitRawInput(
             RawInputEvent(
@@ -771,6 +777,7 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
                 pressure = p.pressure,
                 tilt = p.tilt,
                 timeMillis = p.timeMillis,
+                isErasing = isErasing,
             )
         )
     }
