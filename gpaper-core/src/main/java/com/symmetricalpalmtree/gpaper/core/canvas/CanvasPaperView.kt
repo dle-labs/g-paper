@@ -500,7 +500,7 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
 
     /** Whether the stylus is currently on the glass — for device subclasses whose
      *  deferred hardware handoffs must never fire mid-stroke (the Ratta clear ladder). */
-    protected val isPenDown: Boolean get() = penDown
+    override val isPenDown: Boolean get() = penDown
     @Volatile private var penLastLiftMs = 0L
     @Volatile private var penHovering = false
     @Volatile private var penLastHoverMs = 0L
@@ -1138,6 +1138,7 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
 
     override val isPenActive: Boolean
         get() {
+            if (released) return false
             if (penDown || penHovering) return true
             val now = SystemClock.uptimeMillis()
             // The lift tail covers palm "double taps" after writing; the hover tail
@@ -1186,11 +1187,15 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
     }
 
     override fun releaseForHandoff() {
-        // Non-EPD engine: no process-global pen pipeline to hand off.
+        interruptInput()
     }
 
     override fun release() {
         released = true
+        penDown = false
+        penHovering = false
+        gestureMode = GestureMode.NONE
+        fingerMode = FingerMode.NONE
         // Drop selection state without callbacks — the host is tearing the view down.
         selection = null
         transform = null
@@ -1238,6 +1243,23 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
 
     override fun setRawInputListener(listener: RawInputListener?) {
         rawInputListener = listener
+    }
+
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (!hasWindowFocus) interruptInput()
+    }
+
+    /** Settle captured ink and cancel transient manipulation before input goes away.
+     * Device engines may also have native gestures to cancel before this cleanup. */
+    protected open fun interruptInput() {
+        if (released) return
+        // Reuse lost-contact handling: keep a real stroke and close erase/smudge history.
+        cancelActiveGesture()
+        if (isTransformGestureActive) transformGestureCancel()
+        fingerMode = FingerMode.NONE
+        markPenUp()
+        markPenOutOfRange()
     }
 
     // ── Input capture ────────────────────────────────────────────────────────
@@ -1476,6 +1498,7 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
     }
 
     override fun onDetachedFromWindow() {
+        interruptInput()
         committedNode.discardDisplayList()
         committedInk.dropBitmap()
         strokeGeometry.clear()

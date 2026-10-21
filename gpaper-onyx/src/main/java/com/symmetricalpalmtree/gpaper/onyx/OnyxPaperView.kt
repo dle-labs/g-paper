@@ -1045,6 +1045,11 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
         }
     }
 
+    override fun interruptInput() {
+        cancelRawLasso("input interruption")
+        super.interruptInput()
+    }
+
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
         super.onWindowFocusChanged(hasWindowFocus)
         if (hasWindowFocus) {
@@ -1102,6 +1107,7 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
     }
 
     override fun releaseForHandoff() {
+        super.releaseForHandoff()
         closeRawDrawingIfOwner("releaseForHandoff")
     }
 
