@@ -810,7 +810,13 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
             MotionEvent.ACTION_DOWN -> markPenDown()
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> markPenUp()
         }
-        return if (isSetup) touchHelper.onTouchEvent(event) else false
+        if (isSetup) touchHelper.onTouchEvent(event)
+        // Tracking DOWN makes this view the Android contact owner. The SDK may
+        // decline a posted MotionEvent because ink arrives through its raw path;
+        // returning false would then prevent Android from delivering UP/CANCEL,
+        // leaving the palm/sync gate latched even though the contact has ended.
+        // Consume the stream for gate tracking only; never synthesize software ink.
+        return true
     }
 
     // ── EPD content handoffs ─────────────────────────────────────────────────
