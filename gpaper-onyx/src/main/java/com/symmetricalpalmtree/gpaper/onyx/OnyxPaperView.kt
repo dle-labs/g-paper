@@ -119,6 +119,10 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
     private val touchHelper: TouchHelper by lazy { TouchHelper.create(this, rawInputCallback) }
     private var isSetup = false
 
+    // Android events own this flag only until the SDK begins a raw contact.
+    // Raw callbacks then own the shared pen-down gate through their own end.
+    @Volatile private var androidPenContact = false
+
     /**
      * Pen-proximity feed for the [isPenActive] gate — the palm lands a beat before the
      * pen tip, so the gate must close during the approach. With the raw pipeline open,
@@ -578,6 +582,7 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
 
         override fun onBeginRawDrawing(shortcutDrawing: Boolean, touchPoint: TouchPoint) {
             // Before anything else: the pen is on the glass — close the palm gate.
+            androidPenContact = false
             markPenDown()
             if (capturesOutline) {
                 beginRawLasso(touchPoint)
@@ -658,6 +663,7 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
         // routes here whenever the raw path is enabled, regardless of the armed tool.
 
         override fun onBeginRawErasing(shortcutErasing: Boolean, touchPoint: TouchPoint) {
+            androidPenContact = false
             markPenDown()
             // Mid-lasso barrel press: drop the capture/drag so the erase contact is not
             // also interpreted as a lasso gesture; the SDK's hardware erase proceeds.
@@ -785,6 +791,14 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
     // ── MotionEvents ─────────────────────────────────────────────────────────
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Android can normalize CANCEL to an unknown/finger pointer. End only a
+        // contact tracked through this path; an independent raw contact stays gated.
+        if (event.actionMasked == MotionEvent.ACTION_CANCEL && androidPenContact) {
+            androidPenContact = false
+            markPenUp()
+            if (isSetup) touchHelper.onTouchEvent(event)
+            return true
+        }
         // The pen among fingers (Phase 47): a mixed event is narrowed to the pen's pointer first.
         stylusOnly(event)?.let { only -> try { return onTouchEvent(only) } finally { only.recycle() } }
         // Finger input never feeds the SDK pen pipeline — the base decides (selection
@@ -807,8 +821,14 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
         // loss), then feed the SDK. Never fall back to the base class's software ink —
         // a dead pipeline must fail loudly, not silently become the generic engine.
         when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> markPenDown()
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> markPenUp()
+            MotionEvent.ACTION_DOWN -> {
+                if (!isPenDown) androidPenContact = true
+                markPenDown()
+            }
+            MotionEvent.ACTION_UP -> if (androidPenContact) {
+                androidPenContact = false
+                markPenUp()
+            }
         }
         if (isSetup) touchHelper.onTouchEvent(event)
         // Tracking DOWN makes this view the Android contact owner. The SDK may
@@ -1083,6 +1103,7 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
     }
 
     override fun interruptInput() {
+        androidPenContact = false
         cancelRawLasso("input interruption")
         super.interruptInput()
     }
@@ -1149,6 +1170,7 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
     }
 
     override fun release() {
+        androidPenContact = false
         unsubscribePenProximity()
         closeRawDrawingIfOwner("release")
         super.release()
