@@ -11,6 +11,7 @@ import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.RenderNode
 import android.os.SystemClock
+import android.os.Trace
 import android.util.Log
 import kotlin.math.min
 import kotlin.math.abs
@@ -1876,53 +1877,59 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
         points: List<StrokePoint>,
         allowGestures: Boolean = true,
     ): Boolean {
-        if (points.isEmpty()) return true
-        if (allowGestures && tool == Tool.PEN &&
-            (smartLassoEnabled || scribbleEraseEnabled) && tryConsumeGesture(points)
-        ) {
-            return false
-        }
-        val stroke = Stroke(
-            id = takePendingStrokeId(),
-            points = points,
-            color = penColor,
-            width = penWidth,
-            style = penStyle,
-        )
-        if (pageMode == PageMode.RASTER) {
-            // The mark lands as pixels and the object is let go. Same stroke, same id
-            // (the grain is seeded from it, exactly as the live preview was), same
-            // renderer — only what is kept differs. The host hears about it three times:
-            // will-change before the pixels move (its before-image moment), committed
-            // (its timestamps and counts, as in stroke mode), changed after — and the
-            // two raster halves come once per run of the mark (0.1.33), not once per
-            // mark, so a long diagonal costs its host the ink's area and not the page's.
-            // Every will-change first: the host must hold the before-image of the whole
-            // mark before any of it lands. One contact is one style, so every one of
-            // those halves names the same layer (0.1.39).
-            val layer = RasterLayer.of(stroke.style)
-            val dirty = rasterDirtyAlong(stroke)
-            for (r in dirty) paperListener?.onRasterWillChange(layer, r)
-            if (bakeCapturedStroke(stroke, dirty)) {
-                // The engine laid this mark itself (Phase 29: its live layer *is* the bake,
-                // so there is no second rendering of it to do). Everything else about this
-                // path is unchanged — including the news, which goes out here exactly as
-                // [compositeIntoRaster] would have sent it, per run and in one call.
-                val rects = dirty.filter { !it.isEmpty }
-                if (rects.isNotEmpty()) onRasterPixelsChanged(rects)
-            } else {
-                compositeIntoRaster(listOf(stroke), dirty)
+        val tracing = Trace.isEnabled()
+        if (tracing) Trace.beginSection("GPaper.commitStroke")
+        try {
+            if (points.isEmpty()) return true
+            if (allowGestures && tool == Tool.PEN &&
+                (smartLassoEnabled || scribbleEraseEnabled) && tryConsumeGesture(points)
+            ) {
+                return false
             }
+            val stroke = Stroke(
+                id = takePendingStrokeId(),
+                points = points,
+                color = penColor,
+                width = penWidth,
+                style = penStyle,
+            )
+            if (pageMode == PageMode.RASTER) {
+                // The mark lands as pixels and the object is let go. Same stroke, same id
+                // (the grain is seeded from it, exactly as the live preview was), same
+                // renderer — only what is kept differs. The host hears about it three times:
+                // will-change before the pixels move (its before-image moment), committed
+                // (its timestamps and counts, as in stroke mode), changed after — and the
+                // two raster halves come once per run of the mark (0.1.33), not once per
+                // mark, so a long diagonal costs its host the ink's area and not the page's.
+                // Every will-change first: the host must hold the before-image of the whole
+                // mark before any of it lands. One contact is one style, so every one of
+                // those halves names the same layer (0.1.39).
+                val layer = RasterLayer.of(stroke.style)
+                val dirty = rasterDirtyAlong(stroke)
+                for (r in dirty) paperListener?.onRasterWillChange(layer, r)
+                if (bakeCapturedStroke(stroke, dirty)) {
+                    // The engine laid this mark itself (Phase 29: its live layer *is* the bake,
+                    // so there is no second rendering of it to do). Everything else about this
+                    // path is unchanged — including the news, which goes out here exactly as
+                    // [compositeIntoRaster] would have sent it, per run and in one call.
+                    val rects = dirty.filter { !it.isEmpty }
+                    if (rects.isNotEmpty()) onRasterPixelsChanged(rects)
+                } else {
+                    compositeIntoRaster(listOf(stroke), dirty)
+                }
+                bakeAfterCommit(stroke)
+                paperListener?.onStrokeCommitted(stroke)
+                for (r in dirty) paperListener?.onRasterChanged(layer, r)
+                return true
+            }
+            strokeList.add(stroke)
+            modelChanged(stroke)
             bakeAfterCommit(stroke)
             paperListener?.onStrokeCommitted(stroke)
-            for (r in dirty) paperListener?.onRasterChanged(layer, r)
             return true
+        } finally {
+            if (tracing) Trace.endSection()
         }
-        strokeList.add(stroke)
-        modelChanged(stroke)
-        bakeAfterCommit(stroke)
-        paperListener?.onStrokeCommitted(stroke)
-        return true
     }
 
     /** The id the in-progress stroke will carry, minting one if nothing has asked yet. */
@@ -2288,49 +2295,55 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
      * and [finalizeEraseRedraw] at gesture end.
      */
     protected fun eraseAlong(points: List<StrokePoint>) {
-        endActiveTransform()
-        if (points.isEmpty()) return
-        val prev = lastEraserPoint
-        if (prev == null) reportedContentErases.clear() // fresh sweep = fresh gesture dedup
-        val sweep = prev?.let { ArrayList<StrokePoint>(points.size + 1).apply {
-            add(it)
-            addAll(points)
-        } } ?: points
-        lastEraserPoint = points.last()
-        if (pageMode == PageMode.RASTER) {
-            eraseRasterAlong(sweep)
-            return
-        }
-        val hitIds = EraseHitTest.hitStrokeIds(strokeList, sweep, eraserRadius)
-        // Host content is erased whole (0.1.4): report ids, the host removes and repaints.
-        val contentHits = if (contentRenderers.isEmpty()) emptyList() else {
-            val targets = contentRenderers.flatMap { r ->
-                r.hitTargets().map { it.contentId to it.bounds }
-            }.filter { (id, _) -> id !in reportedContentErases }
-            EraseHitTest.hitContentIds(targets, sweep, eraserRadius)
-        }
-        if (hitIds.isEmpty() && contentHits.isEmpty()) return
-        // A barrel-button erase can run while a selection is active (lasso mode): if it
-        // takes any selected stroke or content object, the box no longer describes
-        // reality — dismiss.
-        val idSet = hitIds.toHashSet()
-        val sel = selection
-        if (sel != null &&
-            (sel.strokeIds.any { it in idSet } || sel.contentIds.any { it in contentHits })
-        ) {
-            clearSelection()
-        }
-        if (hitIds.isNotEmpty()) {
-            val going = committedStrokesBounds(strokeList.filter { it.id in idSet })
-            strokeList.removeAll { it.id in idSet }
-            modelChanged()
-            going?.let { onCommittedStrokesChanged(it) }
-            paperListener?.onStrokesErased(hitIds)
-            throttledEraseRedraw()
-        }
-        if (contentHits.isNotEmpty()) {
-            reportedContentErases.addAll(contentHits)
-            paperListener?.onContentErased(contentHits)
+        val tracing = Trace.isEnabled()
+        if (tracing) Trace.beginSection("GPaper.eraseBatch")
+        try {
+            endActiveTransform()
+            if (points.isEmpty()) return
+            val prev = lastEraserPoint
+            if (prev == null) reportedContentErases.clear() // fresh sweep = fresh gesture dedup
+            val sweep = prev?.let { ArrayList<StrokePoint>(points.size + 1).apply {
+                add(it)
+                addAll(points)
+            } } ?: points
+            lastEraserPoint = points.last()
+            if (pageMode == PageMode.RASTER) {
+                eraseRasterAlong(sweep)
+                return
+            }
+            val hitIds = EraseHitTest.hitStrokeIds(strokeList, sweep, eraserRadius)
+            // Host content is erased whole (0.1.4): report ids, the host removes and repaints.
+            val contentHits = if (contentRenderers.isEmpty()) emptyList() else {
+                val targets = contentRenderers.flatMap { r ->
+                    r.hitTargets().map { it.contentId to it.bounds }
+                }.filter { (id, _) -> id !in reportedContentErases }
+                EraseHitTest.hitContentIds(targets, sweep, eraserRadius)
+            }
+            if (hitIds.isEmpty() && contentHits.isEmpty()) return
+            // A barrel-button erase can run while a selection is active (lasso mode): if it
+            // takes any selected stroke or content object, the box no longer describes
+            // reality — dismiss.
+            val idSet = hitIds.toHashSet()
+            val sel = selection
+            if (sel != null &&
+                (sel.strokeIds.any { it in idSet } || sel.contentIds.any { it in contentHits })
+            ) {
+                clearSelection()
+            }
+            if (hitIds.isNotEmpty()) {
+                val going = committedStrokesBounds(strokeList.filter { it.id in idSet })
+                strokeList.removeAll { it.id in idSet }
+                modelChanged()
+                going?.let { onCommittedStrokesChanged(it) }
+                paperListener?.onStrokesErased(hitIds)
+                throttledEraseRedraw()
+            }
+            if (contentHits.isNotEmpty()) {
+                reportedContentErases.addAll(contentHits)
+                paperListener?.onContentErased(contentHits)
+            }
+        } finally {
+            if (tracing) Trace.endSection()
         }
     }
 
@@ -2731,25 +2744,31 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
      * is still a potential tap.
      */
     protected fun lassoDragMove(x: Float, y: Float) {
-        if (isTransformGestureActive) {
-            transformGestureMove(x, y)
-            return
+        val tracing = Trace.isEnabled()
+        if (tracing) Trace.beginSection("GPaper.selectionMove")
+        try {
+            if (isTransformGestureActive) {
+                transformGestureMove(x, y)
+                return
+            }
+            if (!dragActive) return
+            val dx = x - dragStartX
+            val dy = y - dragStartY
+            if (!dragThresholdMet) {
+                val threshold = dragThresholdPx()
+                if (dx * dx + dy * dy < threshold * threshold) return
+                dragThresholdMet = true
+                dragHiddenIds = selection?.strokeIds ?: emptySet()
+                dragHiddenContentIds = selection?.contentIds ?: emptySet()
+                onSelectionDragVisual(true)
+                paperListener?.onSelectionDragStarted()
+                redrawCommitted()
+            }
+            applyDragDelta(dx, dy)
+            throttledLassoInvalidate()
+        } finally {
+            if (tracing) Trace.endSection()
         }
-        if (!dragActive) return
-        val dx = x - dragStartX
-        val dy = y - dragStartY
-        if (!dragThresholdMet) {
-            val threshold = dragThresholdPx()
-            if (dx * dx + dy * dy < threshold * threshold) return
-            dragThresholdMet = true
-            dragHiddenIds = selection?.strokeIds ?: emptySet()
-            dragHiddenContentIds = selection?.contentIds ?: emptySet()
-            onSelectionDragVisual(true)
-            paperListener?.onSelectionDragStarted()
-            redrawCommitted()
-        }
-        applyDragDelta(dx, dy)
-        throttledLassoInvalidate()
     }
 
     /**
@@ -2793,54 +2812,60 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
      * [PaperListener.onSelectionMoved] — the selection remains active at its new position.
      */
     protected fun lassoDragFinish(x: Float, y: Float, fromFinger: Boolean = false) {
-        if (isTransformGestureActive) {
-            transformGestureFinish(x, y)
-            return
-        }
-        if (!dragActive) return
-        dragActive = false
-        if (!dragThresholdMet) {
+        val tracing = Trace.isEnabled()
+        if (tracing) Trace.beginSection("GPaper.selectionFinish")
+        try {
+            if (isTransformGestureActive) {
+                transformGestureFinish(x, y)
+                return
+            }
+            if (!dragActive) return
+            dragActive = false
+            if (!dragThresholdMet) {
+                dragStrokes = emptyList()
+                dragContentTargets = emptyList()
+                snapTargets = emptyList()
+                activeSnapGuides = emptyList()
+                if (selection != null) {
+                    if (fromFinger) scheduleEscrowedTap(x, y) else paperListener?.onSelectionTapped(x, y)
+                }
+                return
+            }
+            dragThresholdMet = false
+            // Settle on the lift position — freshest, and a fast drag can travel a real
+            // distance between the last move sample and the lift — but through the SAME snap
+            // pass the samples took. Reading `x - dragStartX` raw here would silently undo the
+            // snap the user just watched catch.
+            applyDragDelta(x - dragStartX, y - dragStartY)
+            val dx = dragDx
+            val dy = dragDy
+            dragDx = 0f
+            dragDy = 0f
             dragStrokes = emptyList()
             dragContentTargets = emptyList()
             snapTargets = emptyList()
             activeSnapGuides = emptyList()
-            if (selection != null) {
-                if (fromFinger) scheduleEscrowedTap(x, y) else paperListener?.onSelectionTapped(x, y)
+            dragHiddenIds = emptySet()
+            dragHiddenContentIds = emptySet()
+            onSelectionDragVisual(false)
+            val sel = selection
+            if (sel == null) {
+                redrawCommitted()
+                return
             }
-            return
-        }
-        dragThresholdMet = false
-        // Settle on the lift position — freshest, and a fast drag can travel a real
-        // distance between the last move sample and the lift — but through the SAME snap
-        // pass the samples took. Reading `x - dragStartX` raw here would silently undo the
-        // snap the user just watched catch.
-        applyDragDelta(x - dragStartX, y - dragStartY)
-        val dx = dragDx
-        val dy = dragDy
-        dragDx = 0f
-        dragDy = 0f
-        dragStrokes = emptyList()
-        dragContentTargets = emptyList()
-        snapTargets = emptyList()
-        activeSnapGuides = emptyList()
-        dragHiddenIds = emptySet()
-        dragHiddenContentIds = emptySet()
-        onSelectionDragVisual(false)
-        val sel = selection
-        if (sel == null) {
+            if (sel.strokeIds.isNotEmpty()) {
+                for (i in strokeList.indices) {
+                    val s = strokeList[i]
+                    if (s.id in sel.strokeIds) strokeList[i] = s.translated(dx, dy)
+                }
+                modelChanged()
+            }
+            selection = sel.copy(bounds = sel.bounds.offset(dx, dy))
             redrawCommitted()
-            return
+            paperListener?.onSelectionMoved(SelectionMove(sel.strokeIds, sel.contentIds, dx, dy))
+        } finally {
+            if (tracing) Trace.endSection()
         }
-        if (sel.strokeIds.isNotEmpty()) {
-            for (i in strokeList.indices) {
-                val s = strokeList[i]
-                if (s.id in sel.strokeIds) strokeList[i] = s.translated(dx, dy)
-            }
-            modelChanged()
-        }
-        selection = sel.copy(bounds = sel.bounds.offset(dx, dy))
-        redrawCommitted()
-        paperListener?.onSelectionMoved(SelectionMove(sel.strokeIds, sel.contentIds, dx, dy))
     }
 
     /** Cancel an in-flight drag (ACTION_CANCEL, barrel erase, tool change, teardown):
@@ -2879,36 +2904,42 @@ open class CanvasPaperView(context: Context) : View(context), PaperView {
      * a smart-lasso session — the pen restores).
      */
     protected fun completeLassoOutline(outline: List<StrokePoint>) {
-        // Repaint regardless of outcome — the base-drawn trail must leave the screen.
-        invalidate()
-        if (tool == Tool.LASSO_ERASER) {
-            outlineDismissedSelection = false
-            completeLassoErase(outline)
-            return
-        }
-        val dismissed = outlineDismissedSelection
-        outlineDismissedSelection = false
-        val threshold = dragThresholdPx()
-        val extent = Bounds.of(outline)
-        // Below the extent threshold it was a tap: the previous selection was already
-        // dismissed at outline start.
-        val isTap = extent.width < threshold && extent.height < threshold
-        if (!isTap && outline.size >= 3) {
-            val sel = buildSelectionFromOutline(outline)
-            if (sel != null) {
-                selection = sel
-                invalidate()
-                paperListener?.onSelectionCreated(sel)
+        val tracing = Trace.isEnabled()
+        if (tracing) Trace.beginSection("GPaper.lassoSelect")
+        try {
+            // Repaint regardless of outcome — the base-drawn trail must leave the screen.
+            invalidate()
+            if (tool == Tool.LASSO_ERASER) {
+                outlineDismissedSelection = false
+                completeLassoErase(outline)
+                return
             }
-        } else if (isTap && !dismissed && outline.isNotEmpty()) {
-            // An empty-handed tap on bare paper (0.1.5). Not the tap that dismissed a
-            // selection — that contact is spent. Reported at the pen-up point. A
-            // few-sample gesture with a real extent is neither an outline nor a tap and
-            // still reports nothing.
-            val last = outline.last()
-            paperListener?.onPaperTapped(last.x, last.y)
+            val dismissed = outlineDismissedSelection
+            outlineDismissedSelection = false
+            val threshold = dragThresholdPx()
+            val extent = Bounds.of(outline)
+            // Below the extent threshold it was a tap: the previous selection was already
+            // dismissed at outline start.
+            val isTap = extent.width < threshold && extent.height < threshold
+            if (!isTap && outline.size >= 3) {
+                val sel = buildSelectionFromOutline(outline)
+                if (sel != null) {
+                    selection = sel
+                    invalidate()
+                    paperListener?.onSelectionCreated(sel)
+                }
+            } else if (isTap && !dismissed && outline.isNotEmpty()) {
+                // An empty-handed tap on bare paper (0.1.5). Not the tap that dismissed a
+                // selection — that contact is spent. Reported at the pen-up point. A
+                // few-sample gesture with a real extent is neither an outline nor a tap and
+                // still reports nothing.
+                val last = outline.last()
+                paperListener?.onPaperTapped(last.x, last.y)
+            }
+            maybeEndSmartLassoSession()
+        } finally {
+            if (tracing) Trace.endSection()
         }
-        maybeEndSmartLassoSession()
     }
 
     /**

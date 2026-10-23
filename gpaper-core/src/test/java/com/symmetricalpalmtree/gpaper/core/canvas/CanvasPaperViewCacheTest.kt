@@ -22,6 +22,7 @@ import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.annotation.RealObject
 import org.robolectric.shadow.api.Shadow
+import org.robolectric.shadows.ShadowTrace
 import org.robolectric.shadows.ShadowNativeBitmap
 import org.robolectric.util.reflector.Direct
 import org.robolectric.util.reflector.ForType
@@ -136,6 +137,54 @@ class CanvasPaperViewCacheTest {
             assertEquals(Color.BLACK, view.displayPixel(100, 100))
         } finally {
             view.release()
+        }
+    }
+
+    @Test fun commitTraceIncludesListenerAndClosesOnEmptyInputOrFailure() {
+        val view = paper()
+        ShadowTrace.reset()
+        ShadowTrace.setEnabled(true)
+        val failure = IllegalStateException("listener failed")
+        try {
+            assertTrue(view.commit(emptyList()))
+            assertTrue(ShadowTrace.getCurrentSections().isEmpty())
+            assertTrue(ShadowTrace.getPreviousSections().contains("GPaper.commitStroke"))
+            view.setPaperListener(object : PaperListener {
+                override fun onStrokeCommitted(stroke: com.symmetricalpalmtree.gpaper.core.model.Stroke) {
+                    assertTrue(ShadowTrace.getCurrentSections().contains("GPaper.commitStroke"))
+                    throw failure
+                }
+            })
+            assertSame(failure, assertThrows(IllegalStateException::class.java) {
+                view.commit(listOf(StrokePoint(100f, 100f)), allowGestures = false)
+            })
+            assertTrue(ShadowTrace.getCurrentSections().isEmpty())
+            assertEquals(1, view.getStrokes().size)
+        } finally {
+            view.release()
+            ShadowTrace.reset()
+        }
+    }
+
+    @Test fun disabledTracingStillCommitsInkAndCallsItsListener() {
+        val view = paper()
+        ShadowTrace.reset()
+        ShadowTrace.setEnabled(false)
+        var called = false
+        try {
+            view.setPaperListener(object : PaperListener {
+                override fun onStrokeCommitted(stroke: com.symmetricalpalmtree.gpaper.core.model.Stroke) {
+                    called = true
+                }
+            })
+            assertTrue(view.commit(listOf(StrokePoint(100f, 100f)), allowGestures = false))
+            assertTrue(called)
+            assertEquals(1, view.getStrokes().size)
+            assertTrue(ShadowTrace.getPreviousSections().isEmpty())
+            assertTrue(ShadowTrace.getCurrentSections().isEmpty())
+        } finally {
+            view.release()
+            ShadowTrace.reset()
         }
     }
 

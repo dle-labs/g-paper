@@ -3,6 +3,7 @@ package com.symmetricalpalmtree.gpaper.onyx
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.Build
+import android.os.Trace
 import android.graphics.Rect
 import android.util.Log
 import android.view.MotionEvent
@@ -599,29 +600,35 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
         }
 
         override fun onEndRawDrawing(shortcutDrawing: Boolean, touchPoint: TouchPoint) {
-            markPenUp()
-            emitRaw(RawAction.UP, RawTool.STYLUS, touchPoint)
-            // A recognizer consumed this contact's stroke (smart lasso already switched
-            // the tool to LASSO — check BEFORE the lasso branch): wipe the gesture ink
-            // now that the contact is over. Chrome, not writing — no onPenLifted.
-            if (gestureRetractPending) {
-                gestureRetractPending = false
-                retractGestureInk()
-                return
-            }
-            if (capturesOutline) {
-                // Selection gestures are chrome, not writing — no onPenLifted.
-                endRawLasso(touchPoint)
-                return
-            }
-            if (tool == Tool.ERASER) {
-                // Flush throttled removals, then commit pixels to the panel once.
-                finalizeEraseRedraw()
-                post {
-                    EpdController.handwritingRepaint(this@OnyxPaperView, Rect(0, 0, width, height))
+            val tracing = Trace.isEnabled()
+            if (tracing) Trace.beginSection("GPaper.onyxPenUp")
+            try {
+                markPenUp()
+                emitRaw(RawAction.UP, RawTool.STYLUS, touchPoint)
+                // A recognizer consumed this contact's stroke (smart lasso already switched
+                // the tool to LASSO — check BEFORE the lasso branch): wipe the gesture ink
+                // now that the contact is over. Chrome, not writing — no onPenLifted.
+                if (gestureRetractPending) {
+                    gestureRetractPending = false
+                    retractGestureInk()
+                    return
                 }
+                if (capturesOutline) {
+                    // Selection gestures are chrome, not writing — no onPenLifted.
+                    endRawLasso(touchPoint)
+                    return
+                }
+                if (tool == Tool.ERASER) {
+                    // Flush throttled removals, then commit pixels to the panel once.
+                    finalizeEraseRedraw()
+                    post {
+                        EpdController.handwritingRepaint(this@OnyxPaperView, Rect(0, 0, width, height))
+                    }
+                }
+                firePenLifted()
+            } finally {
+                if (tracing) Trace.endSection()
             }
-            firePenLifted()
         }
 
         override fun onRawDrawingTouchPointMoveReceived(touchPoint: TouchPoint) {
@@ -642,20 +649,26 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
         }
 
         override fun onRawDrawingTouchPointListReceived(pointList: TouchPointList) {
-            val points = pointList.points?.map { it.toStrokePoint() } ?: return
-            if (points.isEmpty()) return
-            if (capturesOutline) {
-                if (rawLassoCapture && !rawDragActive) rawLassoListPoints.addAll(points)
-                return
-            }
-            if (tool == Tool.ERASER) {
-                if (!eraseSweepStreamed) eraseAlong(points)
-            } else {
-                // Bake the batch into the committed node so the Android canvas stays
-                // current with the overlay's live ink. The SDK may deliver several
-                // batches per contact; each becomes its own stroke (matching the
-                // reference engine — onPenLifted still fires once, at the end callback).
-                commitCapturedStroke(points)
+            val tracing = Trace.isEnabled()
+            if (tracing) Trace.beginSection("GPaper.onyxStrokeBatch")
+            try {
+                val points = pointList.points?.map { it.toStrokePoint() } ?: return
+                if (points.isEmpty()) return
+                if (capturesOutline) {
+                    if (rawLassoCapture && !rawDragActive) rawLassoListPoints.addAll(points)
+                    return
+                }
+                if (tool == Tool.ERASER) {
+                    if (!eraseSweepStreamed) eraseAlong(points)
+                } else {
+                    // Bake the batch into the committed node so the Android canvas stays
+                    // current with the overlay's live ink. The SDK may deliver several
+                    // batches per contact; each becomes its own stroke (matching the
+                    // reference engine — onPenLifted still fires once, at the end callback).
+                    commitCapturedStroke(points)
+                }
+            } finally {
+                if (tracing) Trace.endSection()
             }
         }
 
@@ -680,13 +693,19 @@ internal class OnyxPaperView(context: Context) : CanvasPaperView(context) {
         }
 
         override fun onEndRawErasing(shortcutErasing: Boolean, touchPoint: TouchPoint) {
-            markPenUp()
-            emitRaw(RawAction.UP, RawTool.UNKNOWN, touchPoint, isErasing = true)
-            finalizeEraseRedraw()
-            post {
-                EpdController.handwritingRepaint(this@OnyxPaperView, Rect(0, 0, width, height))
+            val tracing = Trace.isEnabled()
+            if (tracing) Trace.beginSection("GPaper.onyxEraseUp")
+            try {
+                markPenUp()
+                emitRaw(RawAction.UP, RawTool.UNKNOWN, touchPoint, isErasing = true)
+                finalizeEraseRedraw()
+                post {
+                    EpdController.handwritingRepaint(this@OnyxPaperView, Rect(0, 0, width, height))
+                }
+                firePenLifted()
+            } finally {
+                if (tracing) Trace.endSection()
             }
-            firePenLifted()
         }
 
         override fun onRawErasingTouchPointMoveReceived(touchPoint: TouchPoint) {
