@@ -7,8 +7,6 @@ import android.widget.FrameLayout
 import com.onyx.android.sdk.data.note.TouchPoint
 import com.onyx.android.sdk.pen.RawInputCallback
 import org.robolectric.util.ReflectionHelpers
-import com.symmetricalpalmtree.gpaper.core.PaperListener
-import org.robolectric.shadows.ShadowTrace
 import com.symmetricalpalmtree.gpaper.core.Tool
 import org.junit.Assert.*
 import org.junit.Test
@@ -71,33 +69,6 @@ class OnyxPaperViewInputTest {
         } finally {
             event.recycle()
             paper.release()
-        }
-    }
-
-    @Test fun rawPenUpTraceIncludesListenerAndClosesWhenItThrows() {
-        val paper = OnyxPaperView(RuntimeEnvironment.getApplication()).apply { tool = Tool.PEN }
-        val raw = ReflectionHelpers.getField<RawInputCallback>(paper, "rawInputCallback")
-        val point = TouchPoint(100f, 100f)
-        val failure = IllegalStateException("listener failed")
-        ShadowTrace.reset()
-        ShadowTrace.setEnabled(true)
-        try {
-            paper.setPaperListener(object : PaperListener {
-                override fun onPenLifted() {
-                    assertTrue(ShadowTrace.getCurrentSections().contains("GPaper.onyxPenUp"))
-                    throw failure
-                }
-            })
-            raw.onBeginRawDrawing(false, point)
-            assertSame(failure, assertThrows(IllegalStateException::class.java) {
-                raw.onEndRawDrawing(false, point)
-            })
-            assertFalse(paper.isPenDown)
-            assertTrue(ShadowTrace.getCurrentSections().isEmpty())
-            assertTrue(ShadowTrace.getPreviousSections().contains("GPaper.onyxPenUp"))
-        } finally {
-            paper.release()
-            ShadowTrace.reset()
         }
     }
 

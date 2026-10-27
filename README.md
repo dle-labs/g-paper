@@ -112,31 +112,6 @@ The demo app runs on anything (the generic engine's ink is ordinary View renderi
 Supernote hardware it exercises the firmware pipelines. Note that on e-paper devices the pen
 overlays are invisible to screencap — ink behavior is verified by eye on the panel.
 
-## Measuring host interaction work
-
-With Android app tracing enabled for the consuming package, Perfetto captures these
-fixed-name synchronous sections. With tracing disabled, each site only checks
-`Trace.isEnabled()`; it allocates no timing record or growing history. Sections close
-on early returns and listener exceptions without swallowing the exception.
-
-| Section | Included work |
-| --- | --- |
-| `GPaper.commitStroke` | Captured stroke recognition, model update, committed rendering and synchronous host callbacks |
-| `GPaper.eraseBatch` | One eraser sample batch, hit tests, model changes, immediate redraw and host callbacks |
-| `GPaper.lassoSelect` | Completed lasso outline classification, selection or lasso erase, and host callbacks |
-| `GPaper.selectionMove` | One selection drag/resize/rotation update, including synchronous preview preparation |
-| `GPaper.selectionFinish` | Selection gesture completion, committed changes and host callbacks |
-| `GPaper.onyxStrokeBatch` | BOOX SDK batch conversion and dispatch, including a nested stroke commit when appropriate |
-| `GPaper.onyxPenUp` | BOOX raw drawing end callback, including synchronous pen-lift/selection/erase completion |
-| `GPaper.onyxEraseUp` | BOOX raw erasing end callback and synchronous completion |
-
-BOOX may deliver several stroke batches separately from its pen-up callback. Keep
-batch and pen-up samples separate, and do not add nested durations as independent
-work. Erase batches and move events are per-event measurements, not whole gestures.
-Posted redraws, frame presentation and firmware live-ink latency are outside these
-sections. Physical pen/display evidence is still required. The markers contain no
-note identifiers, samples or user text; listener time is intentionally included.
-
 ## License
 
 MIT — see `LICENSE`.
